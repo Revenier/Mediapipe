@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-time Pose Prediction</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+        margin: 0;
+        padding: 0;
+      }
+      .video-container {
+        position: relative;
+        width: 640px;
+        height: 480px;
+        margin: 20px auto;
+        border-radius: 15px;
+        overflow: hidden;
+      }
+      video,
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 640px;
+        height: 480px;
+      }
+      .prediction {
+        margin-top: 20px;
+        font-size: 24px;
+        color: #333;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Real-time Pose Prediction</h1>
+
+    <div class="video-container">
+      <video id="video" autoplay playsinline style="transform: none"></video>
+      <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+
+    <div class="prediction">
+      <p id="predictionResult">Waiting for prediction...</p>
+    </div>
+
+    <!-- MediaPipe Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+      window.onload = function () {
+        const videoElement = document.getElementById("video");
+        const canvasElement = document.getElementById("canvas");
+        const ctx = canvasElement.getContext("2d");
+        const predictionText = document.getElementById("predictionResult");
+
+        const pose = new Pose({
+          locateFile: (file) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+        });
+
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+
+        pose.onResults(async (results) => {
+          ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+          // Flip canvas horizontally to match non-mirrored video
+          ctx.save();
+          ctx.scale(-1, 1);
+          ctx.translate(-canvasElement.width, 0);
+
+          ctx.drawImage(
+            results.image,
+            0,
+            0,
+            canvasElement.width,
+            canvasElement.height
+          );
+
+          if (results.poseLandmarks) {
+            window.drawLandmarks(ctx, results.poseLandmarks, {
+              color: "#00FF00",
+              fillColor: "#00FF00",
+              lineWidth: 1,
+              radius: 2,
+            });
+
+            // Flatten landmarks to a single array of numbers
+            const flatLandmarks = results.poseLandmarks.flatMap((lm) => [
+              lm.x,
+              lm.y,
+              lm.z,
+              // lm.visibility,
+            ]);
+            if (flatLandmarks.length < 99) {
+              predictionText.innerText =
+                "Error: Not enough landmark data. Expected at least 99 values.";
+              return;
+            }
+
+            try {
+              const response = await fetch("http://127.0.0.1:5000/predict", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ landmarks: flatLandmarks }),
+              });
+
+              const data = await response.json();
+              predictionText.innerText = "Prediction: " + data.predicted_posture;
+            } catch (err) {
+              console.error("Error sending data to backend:", err);
+              predictionText.innerText = "Error contacting backend";
+            }
+          }
+
+          ctx.restore();
+        });
+
+        const camera = new Camera(videoElement, {
+          onFrame: async () => {
+            await pose.send({ image: videoElement });
+          },
+          width: 640,
+          height: 480,
+        });
+
+        camera.start();
+      };
+    </script>
+  </body>
+</html>
