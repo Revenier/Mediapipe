@@ -6,7 +6,6 @@
     <title>Real-time Pose Prediction</title>
     <style>
       body {
-        font-family: Arial, sans-serif;
         text-align: center;
         margin: 0;
         padding: 0;
@@ -38,12 +37,13 @@
     <h1>Real-time Pose Prediction</h1>
 
     <div class="video-container">
-      <video id="video" autoplay playsinline style="transform: none"></video>
+      <video id="video" autoplay playsinline></video>
       <canvas id="canvas" width="640" height="480"></canvas>
     </div>
 
     <div class="prediction">
       <p id="predictionResult">Waiting for prediction...</p>
+      <p id="fpsDisplay">FPS: Calculating...</p>
     </div>
 
     <!-- MediaPipe Libraries -->
@@ -57,6 +57,47 @@
         const canvasElement = document.getElementById("canvas");
         const ctx = canvasElement.getContext("2d");
         const predictionText = document.getElementById("predictionResult");
+        const fpsDisplay = document.getElementById("fpsDisplay");
+
+        // Performance metrics
+        const fpsBuffer = [];
+        const fpsBufferSize = 30; // Average over 30 frames
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+        let processingActive = false; // Flag to prevent overlapping processing
+        let realFPS = 0; // Actual measured FPS
+
+        // Debug variables
+        let renderTime = 0;
+        let poseDetectionTime = 0;
+        let backendCallTime = 0;
+
+        // Function to calculate average FPS and monitor performance
+        function updateFPS() {
+          const currentTime = performance.now();
+          const frameDuration = currentTime - lastFrameTime;
+          lastFrameTime = currentTime;
+          
+          // Calculate current FPS
+          const currentFPS = 1000 / frameDuration;
+          
+          // Add to buffer
+          fpsBuffer.push(currentFPS);
+          
+          // Keep buffer at fixed size
+          if (fpsBuffer.length > fpsBufferSize) {
+            fpsBuffer.shift();
+          }
+          
+          // Calculate average FPS from buffer
+          realFPS = fpsBuffer.reduce((a, b) => a + b, 0) / fpsBuffer.length;
+          
+          // Update display every 5 frames to avoid constantly changing text
+          if (frameCount % 5 === 0) {
+            fpsDisplay.innerText = "FPS: " + realFPS.toFixed(1) + 
+                                  " | Render: " + renderTime.toFixed(1) + "ms"
+          }
+        }
 
         const pose = new Pose({
           locateFile: (file) =>
@@ -71,13 +112,24 @@
         });
 
         pose.onResults(async (results) => {
+          frameCount++;
+          const startTime = performance.now();
+          
+          // Only process if we're not already processing a frame
+          if (processingActive) return;
+          processingActive = true;
+          
+          // Measure pose detection time
+          poseDetectionTime = performance.now() - startTime;
+          
+          // Start render timing
+          const renderStart = performance.now();
+          
+          // Draw the video feed to canvas
           ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-
-          // Flip canvas horizontally to match non-mirrored video
           ctx.save();
           ctx.scale(-1, 1);
           ctx.translate(-canvasElement.width, 0);
-
           ctx.drawImage(
             results.image,
             0,
@@ -87,6 +139,7 @@
           );
 
           if (results.poseLandmarks) {
+            // Draw landmarks
             window.drawLandmarks(ctx, results.poseLandmarks, {
               color: "#00FF00",
               fillColor: "#00FF00",
@@ -94,46 +147,78 @@
               radius: 2,
             });
 
-            // Flatten landmarks to a single array of numbers
-            const flatLandmarks = results.poseLandmarks.flatMap((lm) => [
-              lm.x,
-              lm.y,
-              lm.z,
-              // lm.visibility,
-            ]);
-            if (flatLandmarks.length < 99) {
-              predictionText.innerText =
-                "Error: Not enough landmark data. Expected at least 99 values.";
-              return;
-            }
+            // Only make backend calls every 10 frames instead of 5
+            // to reduce processing overhead
+            if (frameCount % 10 === 0) {
+              const flatLandmarks = results.poseLandmarks.flatMap((lm) => [
+                lm.x,
+                lm.y,
+                lm.z,
+              ]);
 
-            try {
-              const response = await fetch("http://127.0.0.1:5000/predict", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ landmarks: flatLandmarks }),
-              });
+              if (flatLandmarks.length >= 99) {
+                try {
+                  const backendStart = performance.now();
+                  
+                  // Use a timeout to make the API call non-blocking
+                  setTimeout(async () => {
+                    try {
+                      const response = await fetch(
+                        "http://127.0.0.1:5000/predict",
+                        {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ landmarks: flatLandmarks }),
+                        }
+                      );
 
-              const data = await response.json();
-              predictionText.innerText = "Prediction: " + data.predicted_posture;
-            } catch (err) {
-              console.error("Error sending data to backend:", err);
-              predictionText.innerText = "Error contacting backend";
+                      const data = await response.json();
+                      predictionText.innerText =
+                        "Prediction: " + data.predicted_posture;
+                        
+                      backendCallTime = performance.now() - backendStart;
+                    } catch (err) {
+                      console.error("Error sending data to backend:", err);
+                      predictionText.innerText = "Error contacting backend";
+                    }
+                  }, 0);
+                } catch (err) {
+                  console.error("Error in backend call setup:", err);
+                }
+              }
             }
           }
 
           ctx.restore();
+          
+          // Calculate render time
+          renderTime = performance.now() - renderStart;
+          
+          // Update FPS counter
+          updateFPS();
+          
+          // Release the processing lock
+          processingActive = false;
         });
 
         const camera = new Camera(videoElement, {
           onFrame: async () => {
-            await pose.send({ image: videoElement });
+            try {
+              await pose.send({ image: videoElement });
+            } catch (error) {
+              console.error("Error in pose detection:", error);
+            }
           },
           width: 640,
           height: 480,
         });
 
-        camera.start();
+        // Adjust camera settings for better performance
+        camera.start().then(() => {
+          console.log("Camera started successfully");
+        }).catch(error => {
+          console.error("Failed to start camera:", error);
+        });
       };
     </script>
   </body>
